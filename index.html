@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Spatial Showreel + Webcam + Hand Tracking + Center Text</title>
+
+  <style>
+    html, body { margin:0; height:100%; overflow:hidden; background:#fff; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #wrap { position:relative; width:100%; height:100%; }
+    canvas { display:block; }
+
+    /* Center webcam card */
+    #webcamCard {
+      position:absolute;
+      left:50%;
+      bottom:22px;
+      transform:translateX(-50%);
+      width:min(720px, 86vw);
+      aspect-ratio: 16/6;
+      border-radius:22px;
+      background:#111;
+      box-shadow: 0 20px 60px rgba(0,0,0,.25);
+      border: 10px solid rgba(255,255,255,0.95);
+      overflow:hidden;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      pointer-events:none;
+    }
+    #webcamVideo {
+      width:100%;
+      height:100%;
+      object-fit:cover;
+      transform: scaleX(-1);
+      filter: contrast(1.05) saturate(1.05);
+    }
+
+    /* HUD */
+    #hud {
+      position:absolute;
+      top:14px;
+      left:14px;
+      padding:10px 12px;
+      border-radius:12px;
+      background: rgba(255,255,255,0.90);
+      box-shadow: 0 10px 30px rgba(0,0,0,.12);
+      font-size:13px;
+      line-height:1.25;
+      max-width: 560px;
+      user-select:none;
+    }
+    #hud b { font-weight:700; }
+    #hud .muted { opacity:0.75; }
+  </style>
+</head>
+
+<body>
+<div id="wrap">
+  <div id="hud">
+    <b>Spatial Showreel</b> — Webcam + Hand Tracking<br/>
+    <span class="muted">
+      1-hand pinch+drag = rotate • pinch+up/down = zoom •
+      2-hand pinch distance = zoom • twist = rotate • mouse drag/wheel works too
+    </span>
+  </div>
+
+  <div id="webcamCard">
+    <video id="webcamVideo" autoplay playsinline muted></video>
+  </div>
+</div>
+
+<script type="module">
+  import * as THREE from "https://unpkg.com/three@0.160.1/build/three.module.js";
+  import { OrbitControls } from "https://unpkg.com/three@0.160.1/examples/jsm/controls/OrbitControls.js";
+
+  // ==========================================================
+  // 0) 50 PHOTOS SETUP (put your images in ./images/)
+  // ==========================================================
+  // Folder structure:
+  //   index.html
+  //   images/
+  //     1.jpg
+  //     2.jpg
+  //     ...
+  //     50.jpg
+  //
+  // If your files are .png, change ".jpg" to ".png"
+  const urls = Array.from({ length: 50 }, (_, i) => `images/${i + 1}.jpg`);
+
+  // ==========================================================
+  // 1) Three.js setup
+  // ==========================================================
+  const wrap = document.getElementById("wrap");
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xffffff);
+
+  const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 2000);
+  camera.position.set(0, 0, 12);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  wrap.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.95));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.55);
+  dir.position.set(5, 8, 10);
+  scene.add(dir);
+
+  // Fallback controls (mouse/touch)
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.enablePan = false;
+
+  // Tuned for 50 photos:
+  controls.minDistance = 6;
+  controls.maxDistance = 26;
+  controls.rotateSpeed = 0.62;
+  controls.zoomSpeed = 0.95;
+
+  // Track interaction so the text feels “flowy”
+  let isUserInteracting = false;
+  let interactionFade = 0;
+
+  const onPointerDown = () => (isUserInteracting = true);
+  const onPointerUp = () => (isUserInteracting = false);
+
+  renderer.domElement.addEventListener("pointerdown", onPointerDown);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
+
+  // ==========================================================
+  // 2) Photo sphere (TUNED FOR 50)
+  // ==========================================================
+  const group = new THREE.Group();
+  scene.add(group);
+
+  const loader = new THREE.TextureLoader();
+
+  // Slightly larger cards because only 50
+  const cardW = 1.35;
+  const cardH = 1.92;
+
+  // Slightly smaller radius so it feels “full”
+  const radius = 9.1;
+
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+  function makeCard(tex) {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+
+    const geo = new THREE.PlaneGeometry(cardW, cardH);
+    const mat = new THREE.MeshStandardMaterial({
+      map: tex,
+      roughness: 0.55,
+      metalness: 0.0
+    });
+
+    const mesh = new THREE.Mesh(geo, mat);
+
+    // subtle backing shadow
+    const back = new THREE.Mesh(
+      new THREE.PlaneGeometry(cardW * 1.03, cardH * 1.03),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.12 })
+    );
+    back.position.z = -0.01;
+    mesh.add(back);
+
+    return mesh;
+  }
+
+  await Promise.all(urls.map((u, i) => new Promise((resolve) => {
+    loader.load(u, (tex) => {
+      const card = makeCard(tex);
+
+      // Fibonacci sphere placement
+      const y = 1 - (i / (urls.length - 1)) * 2;
+      const r = Math.sqrt(1 - y * y);
+      const theta = goldenAngle * i;
+
+      const x = Math.cos(theta) * r;
+      const z = Math.sin(theta) * r;
+
+      card.position.set(x, y, z).multiplyScalar(radius);
+
+      // face outward + gentle tilt
+      card.lookAt(card.position.clone().multiplyScalar(2));
+      card.rotateZ((Math.random() - 0.5) * 0.32);
+
+      group.add(card);
+      resolve();
+    }, undefined, () => resolve());
+  })));
+
+  let autoRotate = true;
+
+  // ==========================================================
+  // 3) Center Text Billboard (system script-like font)
+  // ==========================================================
+  const CENTER_TEXT = "Happy Anniversary Akshatha";
+  const TEXT_COLOR = "#880019";
+
+  function makeCenterTextBillboard(text) {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = 2600;
+    canvas.height = 760;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Generic script stack that exists on many systems
+    const fontStack =
+      '"Apple Chancery","Snell Roundhand","Segoe Script","Lucida Handwriting","Brush Script MT",cursive';
+
+    ctx.fillStyle = TEXT_COLOR;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    // subtle shadow (still elegant on white bg)
+    ctx.shadowColor = "rgba(0,0,0,0.07)";
+    ctx.shadowBlur = 7;
+    ctx.shadowOffsetY = 2;
+
+    ctx.font = `150px ${fontStack}`;
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    const aspect = canvas.width / canvas.height;
+    const height = 1.30;
+    const width = height * aspect;
+
+    const geo = new THREE.PlaneGeometry(width, height);
+    const mat = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0.0,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(0, 0, 0);
+    mesh.renderOrder = 999;
+    return mesh;
+  }
+
+  const textBillboard = makeCenterTextBillboard(CENTER_TEXT);
+  scene.add(textBillboard);
+
+  // ==========================================================
+  // 4) Webcam
+  // ==========================================================
+  const webcamVideo = document.getElementById("webcamVideo");
+  async function startWebcam() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    webcamVideo.srcObject = stream;
+    await webcamVideo.play();
+    return stream;
+  }
+
+  // ==========================================================
+  // 5) Hand Tracking (MediaPipe)
+  // ==========================================================
+  function loadScript(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.crossOrigin = "anonymous";
+      s.onload = res;
+      s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const dist2D = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+  function lmToPt(lm) { return { x: lm.x, y: lm.y }; }
+  function handCenter(lms) {
+    const a = lms[0], b = lms[5], c = lms[17];
+    return { x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3 };
+  }
+  function pinchAmount(lms) {
+    const t = lmToPt(lms[4]);
+    const i = lmToPt(lms[8]);
+    return dist2D(t, i);
+  }
+
+  function rotateBy(dx, dy) {
+    controls.rotateLeft(dx * 2.4);
+    controls.rotateUp(dy * 2.0);
+    controls.update();
+  }
+  function zoomBy(delta) {
+    const current = camera.position.distanceTo(controls.target);
+    const next = clamp(current * (1 + delta), controls.minDistance, controls.maxDistance);
+    const dir = camera.position.clone().sub(controls.target).normalize();
+    camera.position.copy(controls.target.clone().add(dir.multiplyScalar(next)));
+    controls.update();
+  }
+
+  let handState = { lastOne: null, lastTwo: null };
+  let handInteracting = false;
+
+  function processHands(results) {
+    const multi = results.multiHandLandmarks || [];
+    const now = performance.now();
+
+    if (multi.length === 0) {
+      handState.lastOne = null;
+      handState.lastTwo = null;
+      handInteracting = false;
+      return;
+    }
+
+    const hands = multi
+      .map(lms => ({ lms, c: handCenter(lms), pinch: pinchAmount(lms) }))
+      .sort((h1, h2) => h1.c.x - h2.c.x);
+
+    const PINCH_ON = 0.045;
+
+    if (hands.length === 1) {
+      const h = hands[0];
+      const pinching = h.pinch < PINCH_ON;
+      const center = h.c;
+
+      if (!handState.lastOne) {
+        handState.lastOne = { center, pinching, t: now };
+        handInteracting = pinching;
+        return;
+      }
+
+      const prev = handState.lastOne;
+      const dx = (center.x - prev.center.x);
+      const dy = (center.y - prev.center.y);
+
+      if (pinching) {
+        autoRotate = false;
+        handInteracting = true;
+        rotateBy(dx, dy);
+        zoomBy(dy * 0.9);
+      } else {
+        handInteracting = false;
+        autoRotate = true;
+      }
+
+      handState.lastOne = { center, pinching, t: now };
+      handState.lastTwo = null;
+      return;
+    }
+
+    // Two hands
+    const hL = hands[0];
+    const hR = hands[1];
+
+    const pinchingL = hL.pinch < PINCH_ON;
+    const pinchingR = hR.pinch < PINCH_ON;
+
+    const cL = hL.c;
+    const cR = hR.c;
+
+    const mid = { x: (cL.x + cR.x) / 2, y: (cL.y + cR.y) / 2 };
+    const d = dist2D(cL, cR);
+    const angle = Math.atan2(cR.y - cL.y, cR.x - cL.x);
+
+    if (!handState.lastTwo) {
+      handState.lastTwo = { mid, d, angle, t: now };
+      handInteracting = pinchingL && pinchingR;
+      return;
+    }
+
+    const prev = handState.lastTwo;
+    const bothPinching = pinchingL && pinchingR;
+
+    if (bothPinching) {
+      autoRotate = false;
+      handInteracting = true;
+
+      const dd = (d - prev.d);
+      zoomBy(-dd * 1.8);
+
+      let da = angle - prev.angle;
+      if (da > Math.PI) da -= 2 * Math.PI;
+      if (da < -Math.PI) da += 2 * Math.PI;
+
+      rotateBy(da * 0.45, 0);
+
+      const dx = (mid.x - prev.mid.x);
+      const dy = (mid.y - prev.mid.y);
+      rotateBy(dx * 0.5, dy * 0.5);
+    } else {
+      handInteracting = false;
+      autoRotate = true;
+    }
+
+    handState.lastTwo = { mid, d, angle, t: now };
+    handState.lastOne = null;
+  }
+
+  async function startHands() {
+    await loadScript("https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js");
+    await loadScript("https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js");
+
+    const hands = new window.Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+
+    hands.onResults(processHands);
+
+    const cameraFeed = new window.Camera(webcamVideo, {
+      onFrame: async () => {
+        await hands.send({ image: webcamVideo });
+      },
+      width: 1280,
+      height: 720
+    });
+
+    cameraFeed.start();
+  }
+
+  // ==========================================================
+  // 6) Resize
+  // ==========================================================
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ==========================================================
+  // 7) Animate + "flowing" text
+  // ==========================================================
+  function smoothstep(edge0, edge1, x) {
+    const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+
+    if (autoRotate) {
+      group.rotation.y += 0.0012;
+      group.rotation.x += 0.00023;
+    }
+
+    controls.update();
+
+    // Billboard always faces camera
+    textBillboard.quaternion.copy(camera.quaternion);
+
+    // Flow behavior:
+    // - Visible mainly when you're zoomed in (so it feels intentional)
+    // - Fades down while interacting (so it doesn't "block" you)
+    const dist = camera.position.distanceTo(controls.target);
+
+    // Show more when closer than ~13, fully visible at ~8.8
+    const zoomVisibility = 1.0 - smoothstep(8.8, 13.0, dist);
+
+    const interactingNow = isUserInteracting || handInteracting;
+    interactionFade += ((interactingNow ? 1 : 0) - interactionFade) * 0.12;
+
+    const baseOpacity = 0.92 * zoomVisibility;
+    const reducedOpacity = baseOpacity * (1.0 - 0.65 * interactionFade);
+    textBillboard.material.opacity = reducedOpacity;
+
+    // Slight scale change as you approach
+    const scale = 1.0 + 0.12 * zoomVisibility;
+    textBillboard.scale.setScalar(scale);
+
+    renderer.render(scene, camera);
+  }
+
+  // ==========================================================
+  // 8) Boot
+  // ==========================================================
+  try {
+    await startWebcam();
+    startHands();
+  } catch (e) {
+    console.warn("Webcam/hand tracking failed:", e);
+  }
+
+  animate();
+</script>
+</body>
+</html>
